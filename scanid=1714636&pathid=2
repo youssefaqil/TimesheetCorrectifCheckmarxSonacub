@@ -1,16 +1,12 @@
-par exmeple pour la variablisaiton on fait comme ça : {
+{
   "ConnectionStrings": {
     "DefaultConnection": "Data Source={{DnsTimesheets}},{{PortTimesheets}};Initial Catalog={{DbTimesheets}};Integrated Security=True;Connect Timeout=300;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False;MultipleActiveResultSets=True",
     "PearlConnection": "Data Source={{DsnReferentiel}},{{PortReferentiel}};Initial Catalog={{DbReferentiel}};Integrated Security=False;Connect Timeout=300;Encrypt=False;TrustServerCertificate=False;ApplicationIntent=ReadWrite;MultiSubnetFailover=False;MultipleActiveResultSets=True;User Id={{UserReferentiel}};Password={{PwdReferentiel}}"
   },
 
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
-    }
+  "Cors": {
+    "AllowedOrigins": "{{AllowedOrigins}}"
   },
-  "AllowedHosts": "*",
 
   "Authentication": {
     "Authority": "{{Authority}}",
@@ -18,3 +14,285 @@ par exmeple pour la variablisaiton on fait comme ça : {
     "ValidAudience": "{{ValidAudience}}"
   }
 }
+
+Remplace ton bloc CORS complet par :
+
+var originsRaw = builder.Configuration["Cors:AllowedOrigins"];
+
+if (string.IsNullOrWhiteSpace(originsRaw) || originsRaw.Contains("{{"))
+{
+    throw new InvalidOperationException("CORS configuration missing or not injected by XL Deploy.");
+}
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("FrontendPolicy", policy =>
+    {
+        policy.WithOrigins(originsRaw)
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials()
+              .WithExposedHeaders("Content-Disposition");
+    });
+});
+--------------------------------------------------------------
+Remplace :
+app.UseCors("AllowAll");
+
+par:
+app.UseCors("FrontendPolicy");
+Et place-le ici :
+app.UseHttpsRedirection();
+app.UseCors("FrontendPolicy");
+app.UseAuthentication();
+app.UseAuthorization();
+
+--------------------------------------------------
+
+using FluentValidation;
+using FluentValidation.AspNetCore;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
+using OfficeOpenXml;
+using Serilog;
+using System.IdentityModel.Tokens.Jwt;
+using TimeSheet.Api.Middlewares;
+using TimeSheet.Application.Common;
+using TimeSheet.Infrastructure;
+using TimeSheet.Application;
+
+namespace TimeSheet.Api
+{
+    public class Program
+    {
+        public static void Main(string[] args)
+        {
+            try
+            {
+                var builder = WebApplication.CreateBuilder(args);
+
+                ExcelPackage.License.SetNonCommercialPersonal("TimeSheet");
+                LoggingConfig.ConfigureLogger();
+                builder.Host.UseSerilog();
+                builder.Services.AddHttpContextAccessor();
+
+                builder.Services.AddInfrastructure(builder.Configuration);
+                builder.Services.AddApplication(builder.Configuration);
+
+                builder.Services.AddFluentValidationAutoValidation()
+                    .AddFluentValidationClientsideAdapters();
+
+                builder.Services.AddValidatorsFromAssemblyContaining<IAssemblyMarker>();
+
+                // -----------------------------
+                // 🔐 AntiForgery (for Checkmarx)
+                // -----------------------------
+                builder.Services.AddAntiforgery(options =>
+                {
+                    options.HeaderName = "X-CSRF-TOKEN";
+                    options.Cookie.Name = "X-CSRF-TOKEN";
+                    options.Cookie.HttpOnly = false;
+                    options.Cookie.SecurePolicy = CookieSecurePolicy.Always;
+                    options.Cookie.SameSite = SameSiteMode.Strict;
+                });
+
+                builder.Services.AddControllers(options =>
+                {
+                    options.Filters.Add(new AutoValidateAntiforgeryTokenAttribute());
+                })
+                .AddNewtonsoftJson(options =>
+                {
+                    options.SerializerSettings.ReferenceLoopHandling =
+                        Newtonsoft.Json.ReferenceLoopHandling.Ignore;
+                    options.SerializerSettings.NullValueHandling =
+                        Newtonsoft.Json.NullValueHandling.Ignore;
+                    options.SerializerSettings.ContractResolver =
+                        new Newtonsoft.Json.Serialization.DefaultContractResolver();
+                });
+
+                // -----------------------------
+                // 🌍 CORS via XL Deploy
+                // -----------------------------
+                var originsRaw = builder.Configuration["Cors:AllowedOrigins"];
+
+                if (string.IsNullOrWhiteSpace(originsRaw) || originsRaw.Contains("{{"))
+                {
+                    throw new InvalidOperationException(
+                        "CORS configuration missing or not injected by XL Deploy.");
+                }
+
+                builder.Services.AddCors(options =>
+                {
+                    options.AddPolicy("FrontendPolicy", policy =>
+                    {
+                        policy.WithOrigins(originsRaw)
+                              .AllowAnyHeader()
+                              .AllowAnyMethod()
+                              .AllowCredentials()
+                              .WithExposedHeaders("Content-Disposition");
+                    });
+                });
+
+                // -----------------------------
+                // 🔐 JWT Authentication
+                // -----------------------------
+                JwtSecurityTokenHandler.DefaultInboundClaimTypeMap.Clear();
+
+                builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+                    .AddJwtBearer(options =>
+                    {
+                        options.Authority = builder.Configuration["Authentication:Authority"];
+                        options.RequireHttpsMetadata = true;
+
+                        options.TokenValidationParameters = new TokenValidationParameters
+                        {
+                            ValidateIssuer = true,
+                            ValidIssuer = builder.Configuration["Authentication:ValidIssuer"],
+                            ValidateAudience = true,
+                            ValidAudience = builder.Configuration["Authentication:ValidAudience"],
+                            ValidateLifetime = true,
+                            ValidateIssuerSigningKey = true
+                        };
+                    });
+
+                builder.Services.AddAuthorization();
+
+                builder.Services.AddSwaggerGen(options =>
+                {
+                    options.SwaggerDoc("v1",
+                        new OpenApiInfo { Title = "TimeSheet API", Version = "v1" });
+
+                    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+                    {
+                        Name = "Authorization",
+                        Type = SecuritySchemeType.ApiKey,
+                        In = ParameterLocation.Header,
+                        Description = "JWT Authorization header using the Bearer scheme."
+                    });
+
+                    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+                    {
+                        {
+                            new OpenApiSecurityScheme
+                            {
+                                Reference = new OpenApiReference
+                                {
+                                    Type = ReferenceType.SecurityScheme,
+                                    Id = "Bearer"
+                                }
+                            },
+                            Array.Empty<string>()
+                        }
+                    });
+                });
+
+                var app = builder.Build();
+
+                app.UseMiddleware<GlobalExceptionMiddleware>();
+
+                app.UseSwagger();
+                app.UseSwaggerUI();
+
+                app.UseHttpsRedirection();
+
+                app.UseCors("FrontendPolicy");
+
+                // -----------------------------
+                // 🔐 Generate AntiForgery token
+                // -----------------------------
+                app.Use(async (context, next) =>
+                {
+                    var antiforgery = context.RequestServices.GetRequiredService<IAntiforgery>();
+                    var tokens = antiforgery.GetAndStoreTokens(context);
+
+                    context.Response.Cookies.Append("X-CSRF-TOKEN", tokens.RequestToken!,
+                        new CookieOptions
+                        {
+                            HttpOnly = false,
+                            Secure = true,
+                            SameSite = SameSiteMode.Strict
+                        });
+
+                    await next();
+                });
+
+                app.UseAuthentication();
+                app.UseAuthorization();
+
+                app.UseMiddleware<RequestTrackingMiddleware>();
+
+                app.MapControllers();
+
+                app.Run();
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "Application failed to start");
+            }
+            finally
+            {
+                LoggingConfig.DisposeLogger();
+            }
+        }
+    }
+}
+
+
+-------------------------------------------------------------------------------------------------------
+
+CÔTÉ Angular 19 (OBLIGATOIRE)
+
+Dans app.config
+
+import { ApplicationConfig } from '@angular/core';
+import { provideHttpClient, withInterceptorsFromDi, withXsrfConfiguration } from '@angular/common/http';
+import { provideAnimationsAsync } from '@angular/platform-browser/animations/async';
+import { provideRouter, withEnabledBlockingInitialNavigation, withInMemoryScrolling} from '@angular/router';
+import { providePrimeNG } from 'primeng/config';
+import { appRoutes } from './app.routes';
+import Aura from '@primeng/themes/aura';
+import { HTTP_INTERCEPTORS } from '@angular/common/http';
+import { AuthInterceptor } from '../src/app/core/auth/auth.interceptor';
+import { authEnvironmentInitializer } from '../src/app/core/auth/auth-initializer';
+import { provideOAuthClient } from 'angular-oauth2-oidc';
+import { MessageService } from 'primeng/api';
+
+export const appConfig: ApplicationConfig = {
+  providers: [
+    provideRouter(
+      appRoutes,
+      withInMemoryScrolling({ anchorScrolling: 'enabled', scrollPositionRestoration: 'enabled' }),
+      withEnabledBlockingInitialNavigation()
+    ),
+
+    provideHttpClient(
+      withInterceptorsFromDi(),
+      withXsrfConfiguration({
+        cookieName: 'X-CSRF-TOKEN',
+        headerName: 'X-CSRF-TOKEN'
+      })
+    ),
+
+    provideAnimationsAsync(),
+
+    providePrimeNG({
+      theme: { preset: Aura, options: { darkModeSelector: '.app-dark' } }
+    }),
+
+    {
+      provide: HTTP_INTERCEPTORS,
+      useClass: AuthInterceptor,
+      multi: true
+    },
+
+    authEnvironmentInitializer,
+    provideOAuthClient(),
+    MessageService
+  ]
+};
+
+----------
+
+
