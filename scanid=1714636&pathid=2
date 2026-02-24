@@ -7,3 +7,196 @@ https://localhost:44376/api
 https://timesheets-api.dev.aew.intranatixis.com
 https://timesheets-api.uat.aew.intranatixis.com
 https://timesheets-api.aew.intranatixis.com
+et voilà program.cs :
+
+
+using FluentValidation;
+using FluentValidation.AspNetCore;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
+using OfficeOpenXml;
+using Serilog;
+using System.IdentityModel.Tokens.Jwt;
+using TimeSheet.Api.Helpers;
+using TimeSheet.Api.Middlewares;
+using TimeSheet.Application.Behaviors;
+using TimeSheet.Application.Common;
+using TimeSheet.Infrastructure;
+using TimeSheet.Infrastructure.Persistence;
+using TimeSheet.Application;
+
+namespace TimeSheet.Api
+{
+    public class Program
+    {
+        public static void Main(string[] args)
+        {
+            try
+            {
+                var builder = WebApplication.CreateBuilder(args);
+
+                ExcelPackage.License.SetNonCommercialPersonal("TimeSheet");
+
+                // Serilog from serilog.json
+                LoggingConfig.ConfigureLogger();
+
+                builder.Host.UseSerilog();
+                builder.Services.AddHttpContextAccessor();
+
+                // Infrastructure Layer (DbContext, AutoMapper, services, Repositories)
+                builder.Services.AddInfrastructure(builder.Configuration);
+
+                // Infrastructure Layer (DbContext, AutoMapper, services, Repositories)
+                builder.Services.AddApplication(builder.Configuration);
+
+                // FluentValidation
+                builder.Services.AddFluentValidationAutoValidation()
+                    .AddFluentValidationClientsideAdapters();
+
+                // Saves all validators automatically
+                builder.Services.AddValidatorsFromAssemblyContaining<IAssemblyMarker>();
+
+                // Controllers
+                builder.Services.AddControllers()
+                  .AddNewtonsoftJson(options =>
+                  {
+                      options.SerializerSettings.ReferenceLoopHandling = Newtonsoft.Json.ReferenceLoopHandling.Ignore;
+                      options.SerializerSettings.NullValueHandling = Newtonsoft.Json.NullValueHandling.Ignore;
+                      options.SerializerSettings.ContractResolver = new Newtonsoft.Json.Serialization.DefaultContractResolver();
+                  });
+
+                // CORS 
+                builder.Services.AddCors(options =>
+                {
+                    options.AddPolicy("AllowAll", policy =>
+                    {
+                        policy.AllowAnyOrigin()
+                              .AllowAnyHeader()
+                              .AllowAnyMethod().
+                              WithExposedHeaders("Content-Disposition"); ;
+                    });
+                });
+                //configuring Swagger/OpenAPI
+                //builder.Services.AddEndpointsApiExplorer();
+                builder.Services.AddSwaggerGen(options =>
+                {
+                    options.SwaggerDoc("v1", new OpenApiInfo { Title = "TimeSheet API", Version = "v1" });
+
+                    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+                    {
+                        Name = "Authorization",
+                        Type = SecuritySchemeType.ApiKey,
+                        In = ParameterLocation.Header,
+                        Description = "JWT Authorization header using the Bearer scheme. Example: \"Bearer {token}\""
+                    });
+                    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+                    {
+                        {
+                            new OpenApiSecurityScheme
+                            {
+                                Reference = new OpenApiReference
+                                {
+                                    Type = ReferenceType.SecurityScheme,
+                                    Id = "Bearer"
+                                }
+                            },
+                            new string[] {}
+                        }
+                    });
+
+                    //options.DocumentFilter<HideSchemasSwagger>();
+                });
+
+                JwtSecurityTokenHandler.DefaultInboundClaimTypeMap.Clear();
+                builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+                    .AddJwtBearer(options =>
+                    {
+                        options.Authority = builder.Configuration["Authentication:Authority"];
+                        //options.Authority = "https://localhost:5005";
+                        options.RequireHttpsMetadata = true;
+
+                        options.TokenValidationParameters = new TokenValidationParameters
+                        {
+                            ValidateIssuer = true,
+                            ValidIssuer = builder.Configuration["Authentication:ValidIssuer"],
+                            //ValidIssuer = "https://localhost:5005",
+                            ValidateAudience = true,
+                            ValidAudience = builder.Configuration["Authentication:ValidAudience"],
+                            //ValidAudience = "timesheet_spa_client",
+                            ValidateLifetime = true,
+                            ValidateIssuerSigningKey = true,
+                            //RoleClaimType = "role",
+                            //NameClaimType = "email"
+                        };
+                        options.Events = new JwtBearerEvents
+                        {
+                            OnTokenValidated = context =>
+                            {
+                                return Task.CompletedTask;
+                            },
+                            OnAuthenticationFailed = context =>
+                            {
+                                Console.WriteLine("Authentication failed: " + context.Exception.Message);
+                                return Task.CompletedTask;
+                            }
+                        };
+                    });
+                builder.Services.AddAuthorization(options =>
+                {
+                    options.AddPolicy("AdminController", policy => policy.RequireRole("ControllerManagement"));
+                });
+
+                var app = builder.Build();
+
+                // Middleware global for management errors
+                app.UseMiddleware<GlobalExceptionMiddleware>();
+
+                //Auto-migration
+                //using (var scope = app.Services.CreateScope())
+                //{
+                //    var dbContext = scope.ServiceProvider.GetRequiredService<TimeSheetDbContext>();
+                //    dbContext.Database.Migrate();
+                //}
+                // Configure the HTTP request pipeline.
+                app.UseSerilogRequestLogging();
+
+                //if (app.Environment.IsDevelopment())
+                //{
+                //    app.UseSwagger();
+                //    app.UseSwaggerUI();
+                //}
+                app.UseSwagger();
+                app.UseSwaggerUI();
+                app.UseHttpsRedirection();
+                app.UseCors("AllowAll");
+                // Auth SSO
+                app.UseAuthentication();
+                app.UseAuthorization();
+                /// <summary>
+                /// Middleware for tracking all HTTP requests in the application.
+                /// </summary>
+                app.UseMiddleware<RequestTrackingMiddleware>();
+
+                app.MapControllers();
+                app.MapGet("/", context =>
+                {
+                    context.Response.Redirect("/swagger");
+                    return Task.CompletedTask;
+                });
+                app.Run();
+            }
+            catch (Exception ex)
+            {
+                Log.Fatal(ex, "Application failed to start");
+            }
+            finally
+            {
+                LoggingConfig.DisposeLogger();
+            }
+
+        }
+    }
+}
