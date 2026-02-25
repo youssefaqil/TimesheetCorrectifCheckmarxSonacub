@@ -1,5 +1,3 @@
-Hello ⁠
+Checkmarx a remonté plusieurs vulnérabilités CSRF sur des endpoints modifiant l’état (POST/PUT/DELETE).
 
-Tout le monde
-
-, j'ai une question sur une vulnérabilité CSRF remonté par checkmarx, est ce que ça peut être exploitable dans timesheet?  
+Étant donné que Timesheet utilise une authentification JWT Bearer (sans cookies de session), je souhaiterais confirmer si ce risque est réellement exploitable dans notre contexte, ou s’il peut être classifié comme « Not Exploitable ».
