@@ -1,3 +1,7 @@
+Bonjour à tous,
+
 Checkmarx a remonté plusieurs vulnérabilités CSRF sur des endpoints modifiant l’état (POST/PUT/DELETE).
 
-Étant donné que Timesheet utilise une authentification JWT Bearer (sans cookies de session), je souhaiterais confirmer si ce risque est réellement exploitable dans notre contexte, ou s’il peut être classifié comme « Not Exploitable ».
+Étant donné que Timesheet utilise une authentification JWT Bearer (sans cookies de session), pensez-vous que cette vulnérabilité soit réellement exploitable dans notre contexte ?
+
+Merci d’avance pour vos retours.
